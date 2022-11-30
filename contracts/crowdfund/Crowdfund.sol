@@ -48,6 +48,13 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
         address payable feeRecipient;
     }
 
+    // changed:
+    // Optional minimum / maximum parameters for contribution sizes
+    struct MinMax{
+        uint96 min;
+        uint96 max;
+    }
+
     // Options to be passed into `_initialize()` when the crowdfund is created.
     struct CrowdfundOptions {
         string name;
@@ -57,6 +64,7 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
         uint16 splitBps;
         address initialContributor;
         address initialDelegate;
+        MinMax minMax; // changed
         IGateKeeper gateKeeper;
         bytes12 gateKeeperId;
         FixedGovernanceOpts governanceOpts;
@@ -99,6 +107,9 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     error OnlyPartyDaoError(address notDao);
     error OnlyPartyDaoOrHostError(address notDao);
     error OnlyWhenEmergencyActionsAllowedError();
+    /// changed:
+    error minimumContributionUnmet();
+    error maximumContributionExceeded();
 
     event Burned(address contributor, uint256 ethUsed, uint256 ethOwed, uint256 votingPower);
     event Contributed(
@@ -117,6 +128,9 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     /// @notice The party instance created by `_createParty()`, if any after a
     ///         successful crowdfund.
     Party public party;
+    /// changed:
+    /// @notice MinMax struct, representing a minimum and maximum contribution size
+    MinMax public minMax;
     /// @notice The total (recorded) ETH contributed to this crowdfund.
     uint96 public totalContributions;
     /// @notice The gatekeeper contract to use (if non-null) to restrict who can
@@ -295,9 +309,18 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     /// @param delegate The address to delegate to for the governance phase.
     /// @param gateData Data to pass to the gatekeeper to prove eligibility.
     function contribute(address delegate, bytes memory gateData) public payable onlyDelegateCall {
+        // changed:
+        MinMax memory _minMax = minMax;
+        
+        uint96 contribution = msg.value.safeCastUint256ToUint96();
+
+        if (_minMax.min > 0 || _minMax.max > 0) {
+            _assertContributionWithinMinMax(_minMax.min, _minMax.max, msg.sender, contribution);
+        }
+
         _contribute(
             msg.sender,
-            msg.value.safeCastUint256ToUint96(),
+            contribution, // changed
             delegate,
             // We cannot use `address(this).balance - msg.value` as the previous
             // total contributions in case someone forces (suicides) ETH into this
@@ -353,6 +376,27 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     // Get the final sale price of the bought assets. This will also be the total
     // voting power of the governance party.
     function _getFinalPrice() internal view virtual returns (uint256);
+
+    /// changed:
+    /// @notice Assert contribution meets minimum and total contributions don't exceed maximum (if any)
+    function _assertContributionWithinMinMax(
+        uint96 min,
+        uint96 max,
+        address contributor, 
+        uint96 contribution
+    ) internal view virtual {
+        if (contribution < min) {
+            revert minimumContributionUnmet();
+        }
+
+        ( , uint256 previous_contributions, ) = _getFinalContribution(contributor);
+
+        contribution += previous_contributions.safeCastUint256ToUint96();
+
+        if (max > 0 && contribution > max) {
+            revert maximumContributionExceeded();
+        }
+    }
 
     // Assert that `who` is a host at `governanceOpts.hosts[hostIndex]` and,
     // if so, assert that the governance opts is the same as the crowdfund
